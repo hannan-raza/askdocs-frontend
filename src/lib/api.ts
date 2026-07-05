@@ -1,7 +1,8 @@
 // Shared client-side API helpers for talking to the FastAPI backend.
 // Every call attaches the Auth0 access token as a Bearer header.
 
-const API = process.env.NEXT_PUBLIC_API_URL;
+// const API = process.env.NEXT_PUBLIC_API_URL;
+const API = "/backend";
 
 export type Doc = { source: string; chunks: number };
 
