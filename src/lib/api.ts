@@ -6,6 +6,15 @@ const API = "/backend";
 
 export type Doc = { source: string; chunks: number };
 
+// A CSV dataset (text-to-SQL side of the knowledge base). Unlike PDFs, these
+// are created synchronously and are deleted by numeric id, not source name.
+export type Dataset = {
+  id: number;
+  source: string;
+  rows: number;
+  columns: { name: string }[];
+};
+
 // One entry per CSV/dataset the unified /ask query ran SQL against.
 // Matches the backend `/ask` response shape (see backend ask.py).
 export type SqlResult = {
@@ -69,6 +78,38 @@ export async function deleteDocument(source: string): Promise<void> {
   if (!res.ok) throw new Error(`${res.status}`);
 }
 
+export async function listDatasets(): Promise<Dataset[]> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API}/datasets`, { headers });
+  if (!res.ok) throw new Error(`${res.status}`);
+  const data = await res.json();
+  return data.datasets ?? [];
+}
+
+// CSV upload is synchronous on the backend (the dataset is ready immediately),
+// so unlike uploadDocument there's no "processing" step to poll for. The upload
+// response omits the id, so callers should re-fetch listDatasets() afterward.
+export async function uploadDataset(file: File): Promise<void> {
+  const headers = await authHeaders();
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API}/datasets/upload`, {
+    method: "POST",
+    body: form,
+    headers,
+  });
+  if (!res.ok) throw new Error(`${res.status}`);
+}
+
+export async function deleteDataset(id: number): Promise<void> {
+  const headers = await authHeaders();
+  const res = await fetch(`${API}/datasets/${id}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!res.ok) throw new Error(`${res.status}`);
+}
+
 export async function askQuestion(
   question: string,
   history: { role: string; content: string }[]
@@ -100,7 +141,9 @@ export async function askUnified(
   return {
     answer: data.answer,
     sources: data.sources ?? [],
-    sql: data.sql ?? [],
+    // Guard the shape: the chat calls .length/.map on this, so a non-array
+    // (unexpected backend response) would otherwise crash the message render.
+    sql: Array.isArray(data.sql) ? data.sql : [],
     usedDatasets: data.used_datasets ?? [],
   };
 }

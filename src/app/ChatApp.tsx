@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { askUnified, listDocuments, type Message } from "@/lib/api";
+import { askUnified, listDocuments, listDatasets, type Message } from "@/lib/api";
 
 export default function ChatApp() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -11,8 +11,10 @@ export default function ChatApp() {
   const [docCount, setDocCount] = useState<number | null>(null);
 
   useEffect(() => {
-    listDocuments()
-      .then((docs) => setDocCount(docs.length))
+    // The knowledge base is PDFs (documents) + CSVs (datasets); count both so
+    // CSV-only users aren't wrongly told they have nothing.
+    Promise.all([listDocuments(), listDatasets()])
+      .then(([docs, datasets]) => setDocCount(docs.length + datasets.length))
       .catch(() => setDocCount(null));
   }, []);
 
@@ -60,7 +62,7 @@ export default function ChatApp() {
               <p>
                 You have no documents yet.{" "}
                 <Link href="/documents" className="text-emerald-400 hover:underline">
-                  Upload a PDF
+                  Upload a PDF or CSV
                 </Link>{" "}
                 to begin.
               </p>
@@ -110,6 +112,9 @@ export default function ChatApp() {
             )}
 
             {m.sql && m.sql.length > 0 && (
+              // TODO: these show raw dataset_ids. Small backend change —
+              // include source/filename in the /ask response (sql[] +
+              // used_datasets) — would let this panel show friendly filenames.
               <details className="text-sm text-neutral-400">
                 <summary className="cursor-pointer text-emerald-400">
                   queried data:{" "}
