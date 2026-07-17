@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { askQuestion, listDocuments, type Message } from "@/lib/api";
+import { askUnified, listDocuments, type Message } from "@/lib/api";
 
 export default function ChatApp() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -29,10 +29,13 @@ export default function ChatApp() {
         role: m.role,
         content: m.content,
       }));
-      const { answer, sources } = await askQuestion(question, history);
+      const { answer, sources, sql, usedDatasets } = await askUnified(
+        question,
+        history
+      );
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: answer, sources },
+        { role: "assistant", content: answer, sources, sql, usedDatasets },
       ]);
     } catch (err) {
       setMessages((prev) => [
@@ -100,6 +103,30 @@ export default function ChatApp() {
                       className="rounded border border-neutral-800 bg-neutral-900 px-3 py-2 whitespace-pre-wrap text-xs"
                     >
                       {s}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            {m.sql && m.sql.length > 0 && (
+              <details className="text-sm text-neutral-400">
+                <summary className="cursor-pointer text-emerald-400">
+                  queried data:{" "}
+                  {(m.usedDatasets && m.usedDatasets.length > 0
+                    ? m.usedDatasets
+                    : m.sql.map((s) => s.dataset_id)
+                  ).join(", ")}
+                </summary>
+                <div className="mt-2 space-y-3">
+                  {m.sql.map((s, j) => (
+                    <div key={j} className="space-y-1">
+                      <div className="text-xs text-neutral-500">
+                        {s.dataset_id}
+                      </div>
+                      <pre className="rounded border border-neutral-800 bg-neutral-900 px-3 py-2 overflow-x-auto whitespace-pre-wrap text-xs">
+                        {s.sql}
+                      </pre>
                     </div>
                   ))}
                 </div>
