@@ -147,3 +147,93 @@ export async function askUnified(
     usedDatasets: data.used_datasets ?? [],
   };
 }
+
+// Callbacks for the streaming variant of the unified query. The caller drives
+// its UI from these: append `onToken` text live, attach `onMetadata` fields to
+// the finished message, and surface `onError` (partial answer stays visible).
+export type AskStreamHandlers = {
+  onToken: (text: string) => void;
+  onMetadata: (meta: {
+    sources: string[];
+    sql: SqlResult[];
+    usedDatasets: string[];
+  }) => void;
+  onError: (message: string) => void;
+};
+
+// Streaming unified query: same request as askUnified but with ?stream=true, so
+// the backend answers as Server-Sent Events and the answer types out live.
+// SSE contract (in order): repeated {type:"token",text}, optional
+// {type:"error",message}, always a final {type:"metadata",...}, then [DONE].
+// The metadata frame mirrors the non-streaming JSON fields exactly.
+//
+// This resolves when the stream ends ([DONE] or the body closes). Frame-level
+// failures arrive via onError; transport failures (bad status, no body, network
+// drop) throw so the caller can fall back to the non-streaming askUnified.
+export async function askUnifiedStream(
+  question: string,
+  history: { role: string; content: string }[],
+  handlers: AskStreamHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const headers = await authHeaders();
+  // Not the /backend rewrite: SSE goes through a dedicated Route Handler
+  // (app/api/ask-stream) that pipes the stream through un-buffered. The rewrite
+  // buffers responses, which would defeat token-by-token streaming.
+  const res = await fetch(`/api/ask-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify({ question, history }),
+    signal,
+  });
+  if (!res.ok || !res.body) throw new Error(`API error: ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  // SSE frames are newline-delimited "data: {...}" lines. We buffer raw bytes
+  // and process one complete line at a time; a partial line stays in `buffer`
+  // until the next chunk completes it.
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line.startsWith("data:")) continue; // skip comments/keep-alives
+
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") return;
+
+      let evt: {
+        type?: string;
+        text?: string;
+        message?: string;
+        sources?: string[];
+        sql?: SqlResult[];
+        used_datasets?: string[];
+      };
+      try {
+        evt = JSON.parse(payload);
+      } catch {
+        continue; // ignore a malformed frame rather than aborting the stream
+      }
+
+      if (evt.type === "token") {
+        handlers.onToken(evt.text ?? "");
+      } else if (evt.type === "metadata") {
+        handlers.onMetadata({
+          sources: evt.sources ?? [],
+          sql: Array.isArray(evt.sql) ? evt.sql : [],
+          usedDatasets: evt.used_datasets ?? [],
+        });
+      } else if (evt.type === "error") {
+        handlers.onError(evt.message ?? "the answer was interrupted");
+      }
+    }
+  }
+}

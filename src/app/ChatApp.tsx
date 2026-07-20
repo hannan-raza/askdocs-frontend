@@ -2,7 +2,13 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { askUnified, listDocuments, listDatasets, type Message } from "@/lib/api";
+import {
+  askUnified,
+  askUnifiedStream,
+  listDocuments,
+  listDatasets,
+  type Message,
+} from "@/lib/api";
 
 export default function ChatApp() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -18,35 +24,78 @@ export default function ChatApp() {
       .catch(() => setDocCount(null));
   }, []);
 
+  // Merge a patch into the last message (the in-progress assistant reply). All
+  // stream updates go through this so we never depend on a captured index.
+  function patchLastMessage(patch: (m: Message) => Partial<Message>) {
+    setMessages((prev) => {
+      const next = [...prev];
+      const last = next.length - 1;
+      next[last] = { ...next[last], ...patch(next[last]) };
+      return next;
+    });
+  }
+
   async function sendMessage() {
     const question = input.trim();
     if (!question || loading) return;
 
-    setMessages((prev) => [...prev, { role: "user", content: question }]);
+    const history = messages.slice(-6).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    // Push the user turn plus an empty assistant placeholder we stream into.
+    // While its content is "", the bubble shows a "Thinking…" indicator.
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: question },
+      { role: "assistant", content: "" },
+    ]);
     setInput("");
     setLoading(true);
 
+    let started = false; // has the first token arrived?
     try {
-      const history = messages.slice(-6).map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
-      const { answer, sources, sql, usedDatasets } = await askUnified(
-        question,
-        history
-      );
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: answer, sources, sql, usedDatasets },
-      ]);
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `Error: ${err instanceof Error ? err.message : "request failed"}`,
+      await askUnifiedStream(question, history, {
+        onToken: (text) => {
+          started = true;
+          patchLastMessage((m) => ({ content: m.content + text }));
         },
-      ]);
+        onMetadata: ({ sources, sql, usedDatasets }) => {
+          patchLastMessage(() => ({ sources, sql, usedDatasets }));
+        },
+        onError: (message) => {
+          // Keep whatever streamed so far, but make the interruption visible.
+          patchLastMessage((m) => ({
+            content:
+              (m.content ? m.content + "\n\n" : "") +
+              `⚠️ Interrupted: ${message}`,
+          }));
+        },
+      });
+    } catch (err) {
+      if (!started) {
+        // Streaming never got going (bad status / no body / network) — fall
+        // back to the non-streaming endpoint so the user still gets an answer.
+        try {
+          const { answer, sources, sql, usedDatasets } = await askUnified(
+            question,
+            history
+          );
+          patchLastMessage(() => ({ content: answer, sources, sql, usedDatasets }));
+        } catch (err2) {
+          patchLastMessage(() => ({
+            content: `Error: ${err2 instanceof Error ? err2.message : "request failed"}`,
+          }));
+        }
+      } else {
+        // Mid-stream transport drop: keep the partial answer, mark it cut off.
+        patchLastMessage((m) => ({
+          content:
+            (m.content ? m.content + "\n\n" : "") +
+            `⚠️ Interrupted: ${err instanceof Error ? err.message : "connection lost"}`,
+        }));
+      }
     } finally {
       setLoading(false);
     }
@@ -87,10 +136,15 @@ export default function ChatApp() {
               className={
                 m.role === "user"
                   ? "inline-block rounded-lg bg-neutral-800 px-4 py-2"
-                  : "rounded-lg border border-neutral-800 px-4 py-3"
+                  : "rounded-lg border border-neutral-800 px-4 py-3 whitespace-pre-wrap"
               }
             >
-              {m.content}
+              {m.role === "assistant" && m.content === "" ? (
+                // Pre-stream: retrieval + SQL are running, no token yet.
+                <span className="text-neutral-500 animate-pulse">Thinking…</span>
+              ) : (
+                m.content
+              )}
             </div>
 
             {m.sources && m.sources.length > 0 && (
@@ -139,8 +193,6 @@ export default function ChatApp() {
             )}
           </div>
         ))}
-
-        {loading && <div className="text-sm text-neutral-500">Thinking…</div>}
       </main>
 
       <footer className="px-6 py-4 border-t border-neutral-800">
